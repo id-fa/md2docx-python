@@ -1,0 +1,607 @@
+use std::path::Path;
+
+use anyhow::Result;
+use docx_rs::*;
+
+use crate::config::Config;
+use crate::heading::HeadingManager;
+use crate::ir::{Block, Inline, ListItem};
+use crate::styles;
+
+pub fn convert_to_docx(blocks: &[Block], config: &Config, base_path: &Path) -> Result<Docx> {
+    let mut ctx = ConvertContext::new(config, base_path);
+    let mut docx = Docx::new();
+
+    // sample.docx 準拠のスタイル・番号定義を適用
+    docx = styles::setup_document_styles(docx, config);
+
+    for block in blocks {
+        docx = ctx.convert_block(docx, block);
+    }
+
+    Ok(docx)
+}
+
+struct ConvertContext<'a> {
+    config: &'a Config,
+    base_path: &'a Path,
+    heading_mgr: HeadingManager,
+}
+
+impl<'a> ConvertContext<'a> {
+    fn new(config: &'a Config, base_path: &'a Path) -> Self {
+        Self {
+            config,
+            base_path,
+            heading_mgr: HeadingManager::new(),
+        }
+    }
+
+    fn convert_block(&mut self, docx: Docx, block: &Block) -> Docx {
+        match block {
+            Block::Heading { level, content } => self.convert_heading(docx, *level, content),
+            Block::Paragraph { content } => self.convert_paragraph(docx, content),
+            Block::BulletList { items } => self.convert_bullet_list(docx, items, 0),
+            Block::OrderedList { items, start } => {
+                self.convert_ordered_list(docx, items, *start, 0)
+            }
+            Block::Table {
+                headers,
+                rows,
+                alignments,
+            } => self.convert_table(docx, headers, rows, alignments),
+            Block::CodeBlock { lang, code } => self.convert_code_block(docx, lang.as_deref(), code),
+            Block::Image { alt, path } => self.convert_image(docx, alt, path),
+            Block::BlockQuote { children } => {
+                let mut d = docx;
+                for child in children {
+                    d = self.convert_block(d, child);
+                }
+                d
+            }
+            Block::ThematicBreak => {
+                // 水平線 → 空段落で代替
+                docx.add_paragraph(Paragraph::new())
+            }
+        }
+    }
+
+    fn convert_heading(&mut self, docx: Docx, level: u8, content: &[Inline]) -> Docx {
+        // heading_mgr のカウンタを進める（番号同期のため）
+        let _ = self.heading_mgr.next_heading(level, content);
+
+        // テキストから既存の番号部分を除去
+        let plain_text: String = content.iter().map(|i| i.to_plain_text()).collect();
+        let display_text = self.heading_mgr.strip_number(level, plain_text.trim());
+
+        // Run はテキストのみ（フォント・サイズ・boldはスタイルが担当）
+        let run = Run::new().add_text(&display_text);
+
+        // スタイル ID: 見出し1="1", 見出し2="2", ...
+        let style_id = level.to_string();
+
+        // 段落にスタイルと numbering を適用
+        let para = Paragraph::new()
+            .add_run(run)
+            .style(&style_id)
+            .numbering(
+                NumberingId::new(styles::HEADING_NUM_ID),
+                IndentLevel::new((level as usize).saturating_sub(1)),
+            )
+            .keep_next(true);
+
+        docx.add_paragraph(para)
+    }
+
+    fn convert_paragraph(&self, docx: Docx, content: &[Inline]) -> Docx {
+        let para = self
+            .build_paragraph(content, false)
+            .style(styles::BODY_TEXT_STYLE_ID);
+        docx.add_paragraph(para)
+    }
+
+    fn build_paragraph(&self, content: &[Inline], bold: bool) -> Paragraph {
+        let mut para = Paragraph::new();
+        for inline in content {
+            para = self.add_inline_to_paragraph(para, inline, bold);
+        }
+        para
+    }
+
+    fn add_inline_to_paragraph(&self, para: Paragraph, inline: &Inline, bold: bool) -> Paragraph {
+        match inline {
+            Inline::Text(text) => {
+                let processed = process_text(text);
+                let mut run = self.make_body_run(&processed);
+                if bold {
+                    run = run.bold();
+                }
+                para.add_run(run)
+            }
+            Inline::Code(code) => {
+                let display = format!("「{}」", code);
+                let mut run = self.make_body_run(&display);
+                if bold {
+                    run = run.bold();
+                }
+                para.add_run(run)
+            }
+            Inline::Bold(children) => {
+                let mut p = para;
+                for child in children {
+                    // Bold/Italic → プレーンテキスト化（計画に従いWordスタイルとしてのbold/italicは使わない）
+                    p = self.add_inline_to_paragraph(p, child, bold);
+                }
+                p
+            }
+            Inline::Italic(children) => {
+                let mut p = para;
+                for child in children {
+                    p = self.add_inline_to_paragraph(p, child, bold);
+                }
+                p
+            }
+            Inline::Link { text, url } => {
+                let label: String = text.iter().map(|child| child.to_plain_text()).collect();
+                let display = if label.is_empty() { url.clone() } else { label };
+                let processed = process_text(&display);
+
+                let mut run = self.make_body_run(&processed);
+                if bold {
+                    run = run.bold();
+                }
+
+                let hyperlink = if let Some(anchor) = url.strip_prefix('#') {
+                    Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(run)
+                } else {
+                    Hyperlink::new(url, HyperlinkType::External).add_run(run)
+                };
+
+                para.add_hyperlink(hyperlink)
+            }
+            Inline::SoftBreak => para.add_run(self.make_body_run(" ")),
+            Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
+        }
+    }
+
+    fn make_body_run(&self, text: &str) -> Run {
+        let fonts = RunFonts::new()
+            .ascii(&self.config.fonts.body_en)
+            .hi_ansi(&self.config.fonts.body_en)
+            .east_asia(&self.config.fonts.body_ja)
+            .cs(&self.config.fonts.body_en);
+
+        Run::new()
+            .add_text(text)
+            .size(styles::pt_to_half_point(self.config.sizes.body))
+            .fonts(fonts)
+    }
+
+    fn convert_bullet_list(&mut self, docx: Docx, items: &[ListItem], depth: usize) -> Docx {
+        let mut d = docx;
+        for item in items {
+            let level = depth.min(2); // 最大レベル2
+
+            let mut para = Paragraph::new().style(styles::BULLET_STYLE_ID).numbering(
+                NumberingId::new(styles::BULLET_NUM_ID),
+                IndentLevel::new(level),
+            );
+
+            for inline in &item.content {
+                para = self.add_inline_to_paragraph(para, inline, false);
+            }
+            d = d.add_paragraph(para);
+
+            // ネストされたブロック（BulletList の場合は depth をインクリメント）
+            for child in &item.children {
+                match child {
+                    Block::BulletList {
+                        items: nested_items,
+                    } => {
+                        d = self.convert_bullet_list(d, nested_items, depth + 1);
+                    }
+                    Block::OrderedList {
+                        items: nested_items,
+                        start,
+                    } => {
+                        d = self.convert_ordered_list(d, nested_items, *start, depth + 1);
+                    }
+                    _ => {
+                        d = self.convert_block(d, child);
+                    }
+                }
+            }
+        }
+        d
+    }
+
+    fn convert_ordered_list(
+        &mut self,
+        docx: Docx,
+        items: &[ListItem],
+        start: u64,
+        depth: usize,
+    ) -> Docx {
+        let mut d = docx;
+        for (i, item) in items.iter().enumerate() {
+            let num = start + i as u64;
+            let indent_twip = (depth as i32 + 1) * styles::pt_to_twip(18.0);
+
+            let mut para = Paragraph::new().indent(Some(indent_twip), None, None, None);
+            let prefix = format!("{}. ", num);
+            let prefix_run = self.make_body_run(&prefix);
+            para = para.add_run(prefix_run);
+
+            for inline in &item.content {
+                para = self.add_inline_to_paragraph(para, inline, false);
+            }
+            d = d.add_paragraph(para);
+
+            // ネストされたブロック
+            for child in &item.children {
+                match child {
+                    Block::OrderedList {
+                        items: nested_items,
+                        start,
+                    } => {
+                        d = self.convert_ordered_list(d, nested_items, *start, depth + 1);
+                    }
+                    Block::BulletList {
+                        items: nested_items,
+                    } => {
+                        d = self.convert_bullet_list(d, nested_items, depth + 1);
+                    }
+                    _ => {
+                        d = self.convert_block(d, child);
+                    }
+                }
+            }
+        }
+        d
+    }
+
+    fn convert_table(
+        &mut self,
+        docx: Docx,
+        headers: &[Vec<Inline>],
+        rows: &[Vec<Vec<Inline>>],
+        _alignments: &[crate::ir::Alignment], // TODO: テーブルアライメント未対応
+    ) -> Docx {
+        // 表番号キャプション（Word SEQ フィールド）
+        let caption_fonts = RunFonts::new()
+            .ascii(&self.config.fonts.heading_en)
+            .hi_ansi(&self.config.fonts.heading_en)
+            .east_asia(&self.config.fonts.heading_ja)
+            .cs(&self.config.fonts.heading_en);
+        let body_size = styles::pt_to_half_point(self.config.sizes.body);
+
+        // "表" ラベル（太字・見出しフォント）
+        let label_run = Run::new()
+            .add_text("表")
+            .size(body_size)
+            .bold()
+            .fonts(caption_fonts.clone());
+
+        // SEQ Table フィールド
+        let seq_run = Run::new()
+            .add_field_char(FieldCharType::Begin, true)
+            .add_instr_text(InstrText::Unsupported(" SEQ Table \\* ARABIC ".to_string()))
+            .add_field_char(FieldCharType::Separate, false)
+            .add_text("1")
+            .add_field_char(FieldCharType::End, false)
+            .size(body_size)
+            .bold()
+            .fonts(caption_fonts);
+
+        let caption_para = Paragraph::new()
+            .add_run(label_run)
+            .add_run(seq_run)
+            .align(AlignmentType::Center);
+
+        let docx = docx.add_paragraph(caption_para);
+
+        // ヘッダー行
+        let header_cells: Vec<TableCell> = headers
+            .iter()
+            .map(|cell_content| {
+                let mut para = Paragraph::new();
+                for inline in cell_content {
+                    para = self.add_inline_to_paragraph(para, inline, true);
+                }
+                // ヘッダーはゴシック体・太字
+                let fonts = RunFonts::new()
+                    .ascii(&self.config.fonts.heading_en)
+                    .hi_ansi(&self.config.fonts.heading_en)
+                    .east_asia(&self.config.fonts.heading_ja)
+                    .cs(&self.config.fonts.heading_en);
+                para = para.fonts(fonts).bold();
+                TableCell::new().add_paragraph(para)
+            })
+            .collect();
+
+        let header_row = TableRow::new(header_cells);
+
+        // データ行
+        let mut table_rows = vec![header_row];
+        for row in rows {
+            let cells: Vec<TableCell> = row
+                .iter()
+                .map(|cell_content| {
+                    let mut para = Paragraph::new();
+                    for inline in cell_content {
+                        para = self.add_inline_to_paragraph(para, inline, false);
+                    }
+                    TableCell::new().add_paragraph(para)
+                })
+                .collect();
+            table_rows.push(TableRow::new(cells));
+        }
+
+        let table = Table::new(table_rows);
+        docx.add_table(table)
+    }
+
+    fn convert_code_block(&self, docx: Docx, lang: Option<&str>, code: &str) -> Docx {
+        let _ = lang;
+        // コードブロックはそのまま等幅フォントで表示
+        let fonts = RunFonts::new()
+            .ascii("Courier New")
+            .hi_ansi("Courier New")
+            .east_asia("ＭＳ ゴシック")
+            .cs("Courier New");
+
+        let mut d = docx;
+        for line in code.lines() {
+            let run = Run::new()
+                .add_text(line)
+                .size(styles::pt_to_half_point(9.0))
+                .fonts(fonts.clone());
+
+            let para = Paragraph::new().add_run(run);
+            d = d.add_paragraph(para);
+        }
+        d
+    }
+
+    fn convert_image(&mut self, docx: Docx, alt: &str, path: &str) -> Docx {
+        let image_path = self.base_path.join(path);
+
+        let buf = match std::fs::read(&image_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "警告: 画像ファイルを読み込めません: {} ({})",
+                    image_path.display(),
+                    e
+                );
+                // 画像が見つからない場合はaltテキストのみ表示
+                let run = self.make_body_run(&format!("[画像: {}]", alt));
+                return docx.add_paragraph(Paragraph::new().add_run(run));
+            }
+        };
+
+        // 画像をPNGに変換（docx-rsはPNG/JPEGをサポート）
+        let png_buf = match convert_to_png(&buf) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("警告: 画像の変換に失敗しました: {} ({})", path, e);
+                let run = self.make_body_run(&format!("[画像: {}]", alt));
+                return docx.add_paragraph(Paragraph::new().add_run(run));
+            }
+        };
+
+        let pic = Pic::new(&png_buf);
+
+        let image_para = Paragraph::new()
+            .add_run(Run::new().add_image(pic))
+            .align(AlignmentType::Center);
+
+        let docx = docx.add_paragraph(image_para);
+
+        // 図番号キャプション（Word SEQ フィールド）
+        let caption_fonts = RunFonts::new()
+            .ascii(&self.config.fonts.body_en)
+            .hi_ansi(&self.config.fonts.body_en)
+            .east_asia(&self.config.fonts.body_ja)
+            .cs(&self.config.fonts.body_en);
+        let body_size = styles::pt_to_half_point(self.config.sizes.body);
+
+        // "図" ラベル
+        let label_run = Run::new()
+            .add_text("図")
+            .size(body_size)
+            .fonts(caption_fonts.clone());
+
+        // SEQ Figure フィールド
+        let seq_run = Run::new()
+            .add_field_char(FieldCharType::Begin, true)
+            .add_instr_text(InstrText::Unsupported(
+                " SEQ Figure \\* ARABIC ".to_string(),
+            ))
+            .add_field_char(FieldCharType::Separate, false)
+            .add_text("1")
+            .add_field_char(FieldCharType::End, false)
+            .size(body_size)
+            .fonts(caption_fonts.clone());
+
+        let mut caption_para = Paragraph::new()
+            .add_run(label_run)
+            .add_run(seq_run)
+            .align(AlignmentType::Center);
+
+        if !alt.is_empty() {
+            let alt_run = Run::new()
+                .add_text(format!(" {}", alt))
+                .size(body_size)
+                .fonts(caption_fonts);
+            caption_para = caption_para.add_run(alt_run);
+        }
+
+        docx.add_paragraph(caption_para)
+    }
+}
+
+/// 画像データをPNG形式に変換する
+fn convert_to_png(buf: &[u8]) -> Result<Vec<u8>> {
+    let img = image::load_from_memory(buf)?;
+    let mut png_buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png_buf, image::ImageFormat::Png)?;
+    Ok(png_buf.into_inner())
+}
+
+/// テキスト処理: 英日間スペースの削除
+fn process_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ' ' && i > 0 && i + 1 < chars.len() {
+            let prev = chars[i - 1];
+            let next = chars[i + 1];
+            // 英語→スペース→日本語 or 日本語→スペース→英語 のスペースを削除
+            if (is_ascii_char(prev) && is_japanese_char(next))
+                || (is_japanese_char(prev) && is_ascii_char(next))
+            {
+                i += 1;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+fn is_ascii_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c.is_ascii_punctuation()
+}
+
+fn is_japanese_char(c: char) -> bool {
+    matches!(c,
+        '\u{3040}'..='\u{309F}' | // ひらがな
+        '\u{30A0}'..='\u{30FF}' | // カタカナ
+        '\u{4E00}'..='\u{9FFF}' | // CJK統合漢字
+        '\u{3400}'..='\u{4DBF}' | // CJK統合漢字拡張A
+        '\u{FF00}'..='\u{FFEF}' | // 全角文字
+        '\u{3000}'..='\u{303F}'   // CJK記号
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use docx_rs::{DocumentChild, HyperlinkData, ParagraphChild, RunChild};
+
+    #[test]
+    fn converts_inline_link_to_word_hyperlink() {
+        let blocks = vec![Block::Paragraph {
+            content: vec![Inline::Link {
+                text: vec![Inline::Text("Rust".to_string())],
+                url: "https://www.rust-lang.org/".to_string(),
+            }],
+        }];
+
+        let docx = convert_to_docx(&blocks, &Config::default(), Path::new(".")).unwrap();
+        let para = match &docx.document.children[0] {
+            DocumentChild::Paragraph(p) => p,
+            other => panic!("unexpected child: {other:?}"),
+        };
+
+        let hyperlink = para
+            .children
+            .iter()
+            .find_map(|child| match child {
+                ParagraphChild::Hyperlink(link) => Some(link),
+                _ => None,
+            })
+            .expect("hyperlink should exist");
+
+        match &hyperlink.link {
+            HyperlinkData::External { path, .. } => {
+                assert_eq!(path, "https://www.rust-lang.org/");
+            }
+            other => panic!("unexpected hyperlink type: {other:?}"),
+        }
+
+        let link_text = hyperlink
+            .children
+            .iter()
+            .find_map(|child| match child {
+                ParagraphChild::Run(run) => {
+                    run.children.iter().find_map(|run_child| match run_child {
+                        RunChild::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("hyperlink text should exist");
+        assert_eq!(link_text, "Rust");
+    }
+
+    #[test]
+    fn inserts_space_for_soft_break() {
+        let blocks = vec![Block::Paragraph {
+            content: vec![
+                Inline::Text("foo".to_string()),
+                Inline::SoftBreak,
+                Inline::Text("bar".to_string()),
+            ],
+        }];
+
+        let docx = convert_to_docx(&blocks, &Config::default(), Path::new(".")).unwrap();
+        let para = match &docx.document.children[0] {
+            DocumentChild::Paragraph(p) => p,
+            other => panic!("unexpected child: {other:?}"),
+        };
+
+        let mut joined = String::new();
+        for child in &para.children {
+            if let ParagraphChild::Run(run) = child {
+                for run_child in &run.children {
+                    if let RunChild::Text(t) = run_child {
+                        joined.push_str(&t.text);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(joined, "foo bar");
+    }
+
+    #[test]
+    fn indents_nested_ordered_lists_by_depth() {
+        let nested = Block::OrderedList {
+            start: 1,
+            items: vec![ListItem {
+                content: vec![Inline::Text("outer".to_string())],
+                children: vec![Block::OrderedList {
+                    start: 1,
+                    items: vec![ListItem {
+                        content: vec![Inline::Text("inner".to_string())],
+                        children: vec![],
+                    }],
+                }],
+            }],
+        };
+
+        let docx = convert_to_docx(&[nested], &Config::default(), Path::new(".")).unwrap();
+        let indents: Vec<Option<i32>> = docx
+            .document
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                DocumentChild::Paragraph(p) => {
+                    Some(p.property.indent.as_ref().and_then(|i| i.start))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(indents.len(), 2);
+        assert_eq!(indents[0], Some(360));
+        assert_eq!(indents[1], Some(720));
+    }
+}

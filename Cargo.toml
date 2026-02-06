@@ -1,0 +1,13 @@
+[package]
+name = "md2word"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pulldown-cmark = { version = "0.12", features = ["simd"] }
+docx-rs = "0.4"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+image = "0.25"
+anyhow = "1"

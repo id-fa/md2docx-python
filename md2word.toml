@@ -1,0 +1,17 @@
+[fonts]
+body_ja = "游明朝"
+body_en = "Century"
+heading_ja = "游ゴシック"
+heading_en = "Century"
+
+[sizes]
+body = 10.5
+heading1 = 14.0
+heading2 = 12.0
+heading3 = 11.0
+heading4 = 11.0
+heading5 = 10.5
+
+[numbering]
+figure_format = "chapter"
+table_format = "chapter"
