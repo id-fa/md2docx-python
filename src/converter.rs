@@ -11,6 +11,8 @@ use crate::styles;
 
 const EMU_PER_PIXEL: u64 = 9_525;
 const EMU_PER_TWIP: u64 = 635;
+const TABLE_WIDTH_PCT: usize = 5_000;
+const TABLE_CELL_PADDING_TWIP: usize = 80;
 
 pub fn convert_to_docx(blocks: &[Block], config: &Config, base_path: &Path) -> Result<Docx> {
     let mut ctx = ConvertContext::new(config, base_path);
@@ -328,7 +330,7 @@ impl<'a> ConvertContext<'a> {
         docx: Docx,
         headers: &[Vec<Inline>],
         rows: &[Vec<Vec<Inline>>],
-        _alignments: &[crate::ir::Alignment], // TODO: テーブルアライメント未対応
+        alignments: &[crate::ir::Alignment],
     ) -> Docx {
         // 表番号キャプション
         let caption_fonts = RunFonts::new()
@@ -378,12 +380,20 @@ impl<'a> ConvertContext<'a> {
         };
 
         let docx = docx.add_paragraph(caption_para);
+        let column_count = headers
+            .len()
+            .max(rows.iter().map(|row| row.len()).max().unwrap_or(0));
+        if column_count == 0 {
+            return docx;
+        }
+        let column_widths = build_table_grid(column_count, &self.config.page);
 
         // ヘッダー行
         let header_cells: Vec<TableCell> = headers
             .iter()
-            .map(|cell_content| {
-                let mut para = Paragraph::new();
+            .enumerate()
+            .map(|(index, cell_content)| {
+                let mut para = Paragraph::new().align(AlignmentType::Center);
                 for inline in cell_content {
                     para = self.add_inline_to_paragraph(para, inline, true);
                 }
@@ -394,29 +404,51 @@ impl<'a> ConvertContext<'a> {
                     .east_asia(&self.config.fonts.heading_ja)
                     .cs(&self.config.fonts.heading_en);
                 para = para.fonts(fonts).bold();
-                TableCell::new().add_paragraph(para)
+                TableCell::new()
+                    .width(column_widths[index], WidthType::Dxa)
+                    .vertical_align(VAlignType::Center)
+                    .add_paragraph(para)
             })
             .collect();
 
-        let header_row = TableRow::new(header_cells);
+        let header_row = TableRow::new(header_cells).cant_split();
 
         // データ行
         let mut table_rows = vec![header_row];
         for row in rows {
             let cells: Vec<TableCell> = row
                 .iter()
-                .map(|cell_content| {
-                    let mut para = Paragraph::new();
+                .enumerate()
+                .map(|(index, cell_content)| {
+                    let mut para =
+                        Paragraph::new().align(table_alignment_to_paragraph_alignment(
+                            alignments.get(index),
+                        ));
                     for inline in cell_content {
                         para = self.add_inline_to_paragraph(para, inline, false);
                     }
-                    TableCell::new().add_paragraph(para)
+                    TableCell::new()
+                        .width(column_widths[index], WidthType::Dxa)
+                        .vertical_align(VAlignType::Center)
+                        .add_paragraph(para)
                 })
                 .collect();
-            table_rows.push(TableRow::new(cells));
+            table_rows.push(TableRow::new(cells).cant_split());
         }
 
-        let table = Table::new(table_rows);
+        let table = Table::new(table_rows)
+            .align(TableAlignmentType::Center)
+            .layout(TableLayoutType::Fixed)
+            .width(TABLE_WIDTH_PCT, WidthType::Pct)
+            .set_grid(column_widths)
+            .margins(
+                TableCellMargins::new().margin(
+                    TABLE_CELL_PADDING_TWIP,
+                    TABLE_CELL_PADDING_TWIP,
+                    TABLE_CELL_PADDING_TWIP,
+                    TABLE_CELL_PADDING_TWIP,
+                ),
+            );
         docx.add_table(table)
     }
 
@@ -558,6 +590,32 @@ fn fit_image_to_body_width(width_px: u32, height_px: u32, page: &PageConfig) -> 
 
     let scaled_height_emu = height_emu * max_width_emu / width_emu;
     (max_width_emu as u32, scaled_height_emu as u32)
+}
+
+fn body_width_twip(page: &PageConfig) -> u32 {
+    page.width
+        .saturating_sub(page.margin_left.max(0) as u32)
+        .saturating_sub(page.margin_right.max(0) as u32)
+}
+
+fn build_table_grid(column_count: usize, page: &PageConfig) -> Vec<usize> {
+    let body_width = body_width_twip(page).max(column_count as u32);
+    let base = body_width as usize / column_count;
+    let remainder = body_width as usize % column_count;
+
+    (0..column_count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn table_alignment_to_paragraph_alignment(
+    alignment: Option<&crate::ir::Alignment>,
+) -> AlignmentType {
+    match alignment {
+        Some(crate::ir::Alignment::Center) => AlignmentType::Center,
+        Some(crate::ir::Alignment::Right) => AlignmentType::Right,
+        _ => AlignmentType::Left,
+    }
 }
 
 /// テキスト処理: 英日間スペースの削除
@@ -742,5 +800,30 @@ mod tests {
         let (width_emu, height_emu) = fit_image_to_body_width(2532, 729, &config.page);
         assert_eq!(width_emu, 3_810_000);
         assert_eq!(height_emu, 1_096_954);
+    }
+
+    #[test]
+    fn makes_table_full_width_with_padding_and_centered_headers() {
+        let blocks = vec![Block::Table {
+            headers: vec![
+                vec![Inline::Text("H1".to_string())],
+                vec![Inline::Text("H2".to_string())],
+            ],
+            rows: vec![vec![
+                vec![Inline::Text("L".to_string())],
+                vec![Inline::Text("R".to_string())],
+            ]],
+            alignments: vec![crate::ir::Alignment::Left, crate::ir::Alignment::Right],
+        }];
+
+        let docx = convert_to_docx(&blocks, &Config::default(), Path::new(".")).unwrap();
+        let xml = String::from_utf8(docx.document.build()).unwrap();
+
+        assert!(xml.contains(r#"<w:tblW w:w="5000" w:type="pct" />"#));
+        assert!(xml.contains(r#"<w:tblLayout w:type="fixed" />"#));
+        assert!(xml.contains(r#"<w:tblCellMar><w:top w:w="80" w:type="dxa" /><w:left w:w="80" w:type="dxa" /><w:bottom w:w="80" w:type="dxa" /><w:right w:w="80" w:type="dxa" /></w:tblCellMar>"#));
+        assert!(xml.contains(r#"<w:gridCol w:w="4252" w:type="dxa" /><w:gridCol w:w="4252" w:type="dxa" />"#));
+        assert!(xml.contains(r#"<w:jc w:val="center" />"#));
+        assert!(xml.contains(r#"<w:jc w:val="right" />"#));
     }
 }
