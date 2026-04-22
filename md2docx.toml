@@ -37,5 +37,5 @@ level1 = "■"
 level2 = "▲"
 
 [numbering]
-figure_format = "chapter"
-table_format = "chapter"
+figure_format = "sequential"
+table_format = "sequential"

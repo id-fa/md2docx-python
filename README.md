@@ -127,8 +127,8 @@ level1 = "■"
 level2 = "▲"
 
 [numbering]
-figure_format = "chapter"
-table_format = "chapter"
+figure_format = "sequential"
+table_format = "sequential"
 ```
 
 fontsセクションでは本文と見出しそれぞれの日本語フォント、英語フォントを指定する。sizesセクションで本文と各レベルの見出し（H1〜H5）のフォントサイズをpt単位で設定する。
