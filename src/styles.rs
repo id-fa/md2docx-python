@@ -28,6 +28,11 @@ const BULLET_ABSTRACT_NUM_ID: usize = 9;
 /// 箇条書きスタイルの styleId
 pub const BULLET_STYLE_ID: &str = "BulletList";
 
+const HEADING1_BEFORE_PT: f64 = 24.0;
+const HEADING1_AFTER_PT: f64 = 12.0;
+const HEADING2_BEFORE_PT: f64 = 18.0;
+const HEADING2_AFTER_PT: f64 = 8.0;
+
 /// sample.docx のスタイル定義を Docx に適用する
 ///
 /// - docDefaults: minorHAnsi/minorEastAsia テーマ、sz=21 (10.5pt)
@@ -81,6 +86,11 @@ pub fn setup_document_styles(docx: Docx, config: &Config) -> Docx {
         .size(pt_to_half_point(config.sizes.heading1)) // 14pt = sz 28
         .bold()
         .fonts(heading1_fonts)
+        .line_spacing(
+            LineSpacing::new()
+                .before(pt_to_twip(HEADING1_BEFORE_PT) as u32)
+                .after(pt_to_twip(HEADING1_AFTER_PT) as u32),
+        )
         .outline_lvl(0);
     // sample.docx 準拠: numId のみ（ilvl は省略 → デフォルト 0）
     heading1_style.paragraph_property = heading1_style
@@ -97,6 +107,11 @@ pub fn setup_document_styles(docx: Docx, config: &Config) -> Docx {
         .based_on("1")
         .next("Normal")
         .size(pt_to_half_point(config.sizes.heading2)) // 12pt = sz 24
+        .line_spacing(
+            LineSpacing::new()
+                .before(pt_to_twip(HEADING2_BEFORE_PT) as u32)
+                .after(pt_to_twip(HEADING2_AFTER_PT) as u32),
+        )
         .outline_lvl(1);
     // sample.docx 準拠: ilvl のみ（numId は basedOn=heading1 から継承）
     {
@@ -371,4 +386,22 @@ pub fn setup_document_styles(docx: Docx, config: &Config) -> Docx {
         .add_abstract_numbering(bullet_abstract)
         .add_numbering(numbering)
         .add_numbering(bullet_numbering)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heading_styles_include_spacing_for_levels_one_and_two() {
+        let xml = String::from_utf8(
+            setup_document_styles(Docx::new(), &Config::default())
+                .build()
+                .styles,
+        )
+        .unwrap();
+
+        assert!(xml.contains(r#"<w:spacing w:before="480" w:after="240" />"#));
+        assert!(xml.contains(r#"<w:spacing w:before="360" w:after="160" />"#));
+    }
 }
