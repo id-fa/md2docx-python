@@ -159,18 +159,19 @@ class _ConvertContext:
         para = self.document.add_paragraph()
         if styles.BODY_TEXT_STYLE_ID in self.document.styles:
             para.style = self.document.styles[styles.BODY_TEXT_STYLE_ID]
-        self._apply_inlines(para, content, bold=False, style=_InlineStyle.BODY)
+        self._apply_inlines(para, content, style=_InlineStyle.BODY)
 
     def _apply_inlines(
         self,
         para,
         inlines: Iterable[ir.Inline],
         *,
-        bold: bool,
         style: _InlineStyle,
+        bold: bool = False,
+        italic: bool = False,
     ) -> None:
         for inline in inlines:
-            self._add_inline(para, inline, bold=bold, style=style)
+            self._add_inline(para, inline, bold=bold, italic=italic, style=style)
 
     def _add_inline(
         self,
@@ -178,25 +179,28 @@ class _ConvertContext:
         inline: ir.Inline,
         *,
         bold: bool,
+        italic: bool,
         style: _InlineStyle,
     ) -> None:
         if isinstance(inline, ir.Text):
             text = _process_text(inline.value)
-            self._add_run(para, text, bold=bold, style=style)
+            self._add_run(para, text, bold=bold, italic=italic, style=style)
         elif isinstance(inline, ir.Code):
-            self._add_run(para, f"「{inline.value}」", bold=bold, style=style)
-        elif isinstance(inline, (ir.Bold, ir.Italic)):
-            # bold/italic は Word の属性としては付けず、子要素を平坦化する
+            self._add_run(para, f"「{inline.value}」", bold=bold, italic=italic, style=style)
+        elif isinstance(inline, ir.Bold):
             for child in inline.children:
-                self._add_inline(para, child, bold=bold, style=style)
+                self._add_inline(para, child, bold=True, italic=italic, style=style)
+        elif isinstance(inline, ir.Italic):
+            for child in inline.children:
+                self._add_inline(para, child, bold=bold, italic=True, style=style)
         elif isinstance(inline, ir.Link):
             label_inlines = inline.text
             label_plain = ir.inlines_to_plain_text(label_inlines)
             display = label_plain if label_plain else inline.url
             display = _process_text(display)
-            self._add_hyperlink(para, display, inline.url, bold=bold, style=style)
+            self._add_hyperlink(para, display, inline.url, bold=bold, italic=italic, style=style)
         elif isinstance(inline, ir.SoftBreak):
-            self._add_run(para, " ", bold=bold, style=style)
+            self._add_run(para, " ", bold=bold, italic=italic, style=style)
         elif isinstance(inline, ir.HardBreak):
             run = para.add_run()
             br = OxmlElement("w:br")
@@ -208,6 +212,7 @@ class _ConvertContext:
         text: str,
         *,
         bold: bool,
+        italic: bool = False,
         style: _InlineStyle,
     ) -> None:
         spec = self._font_spec_for(style)
@@ -219,6 +224,8 @@ class _ConvertContext:
         _set_run_size(rPr, styles.pt_to_half_point(spec.size_pt))
         if bold:
             _set_run_bold(rPr)
+        if italic:
+            _set_run_italic(rPr)
 
     def _font_spec_for(self, style: _InlineStyle) -> _RunFontSpec:
         c = self.config
@@ -235,6 +242,7 @@ class _ConvertContext:
         url: str,
         *,
         bold: bool,
+        italic: bool = False,
         style: _InlineStyle,
     ) -> None:
         spec = self._font_spec_for(style)
@@ -253,6 +261,8 @@ class _ConvertContext:
         _set_run_size(rPr, styles.pt_to_half_point(spec.size_pt))
         if bold:
             _set_run_bold(rPr)
+        if italic:
+            _set_run_italic(rPr)
         run_el.append(rPr)
         text_el = OxmlElement("w:t")
         text_el.text = text
@@ -591,6 +601,11 @@ def _set_run_size(rPr: etree._Element, half_pt: int) -> None:
 def _set_run_bold(rPr: etree._Element) -> None:
     if rPr.find(qn("w:b")) is None:
         rPr.append(OxmlElement("w:b"))
+
+
+def _set_run_italic(rPr: etree._Element) -> None:
+    if rPr.find(qn("w:i")) is None:
+        rPr.append(OxmlElement("w:i"))
 
 
 def _set_numbering(pPr: etree._Element, *, num_id: int, ilvl: int) -> None:

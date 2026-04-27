@@ -189,6 +189,84 @@ def test_process_text_keeps_pure_english_or_japanese_spaces():
     assert _process_text("日本語 日本語") == "日本語 日本語"
 
 
+def test_bold_inline_emits_w_bold():
+    blocks = [
+        ir.Paragraph(
+            content=[
+                ir.Text("normal "),
+                ir.Bold(children=[ir.Text("boldtext")]),
+                ir.Text(" tail"),
+            ]
+        )
+    ]
+    document = _build(blocks)
+    para = document.paragraphs[-1]
+    bold_runs = [
+        run for run in para.runs
+        if run._r.find(qn("w:rPr")) is not None
+        and run._r.find(qn("w:rPr")).find(qn("w:b")) is not None
+    ]
+    assert len(bold_runs) == 1
+    assert bold_runs[0].text == "boldtext"
+
+
+def test_italic_inline_emits_w_italic():
+    blocks = [
+        ir.Paragraph(
+            content=[
+                ir.Italic(children=[ir.Text("emph")]),
+                ir.Text(" rest"),
+            ]
+        )
+    ]
+    document = _build(blocks)
+    para = document.paragraphs[-1]
+    italic_runs = [
+        run for run in para.runs
+        if run._r.find(qn("w:rPr")) is not None
+        and run._r.find(qn("w:rPr")).find(qn("w:i")) is not None
+    ]
+    assert len(italic_runs) == 1
+    assert italic_runs[0].text == "emph"
+
+
+def test_nested_bold_italic_emits_both():
+    """**太字の*中の斜体*** のように bold/italic がネストする場合、内側の run には両方付く。"""
+    blocks = [
+        ir.Paragraph(
+            content=[
+                ir.Bold(
+                    children=[
+                        ir.Text("B "),
+                        ir.Italic(children=[ir.Text("BI")]),
+                        ir.Text(" B"),
+                    ]
+                )
+            ]
+        )
+    ]
+    document = _build(blocks)
+    para = document.paragraphs[-1]
+    bi_runs = [
+        run for run in para.runs
+        if run._r.find(qn("w:rPr")) is not None
+        and run._r.find(qn("w:rPr")).find(qn("w:b")) is not None
+        and run._r.find(qn("w:rPr")).find(qn("w:i")) is not None
+    ]
+    assert len(bi_runs) == 1
+    assert bi_runs[0].text == "BI"
+
+
+def test_bold_via_full_pipeline_from_markdown():
+    """Markdown の **bold** が docx 出力の w:b に変換されること (E2E)。"""
+    from md2docx.parser import parse_markdown
+
+    blocks = parse_markdown("normal **strong** text")
+    document = _build(blocks)
+    xml = _document_xml(document)
+    assert "<w:b/>" in xml or "<w:b " in xml
+
+
 def test_chapter_numbering_resets_on_new_h1():
     config = Config()
     config.numbering.figure_format = "chapter"
