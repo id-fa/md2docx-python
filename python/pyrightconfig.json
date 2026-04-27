@@ -1,0 +1,6 @@
+{
+  "include": ["md2docx", "tests"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingImports": "warning"
+}

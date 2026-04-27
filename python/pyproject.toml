@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md2docx"
+version = "0.1.0"
+description = "Markdown ファイルを Word (.docx) に変換する CLI ツール (Python 移植版)"
+requires-python = ">=3.10"
+dependencies = [
+    "markdown-it-py>=3.0",
+    "python-docx>=1.1",
+    "Pillow>=10.0",
+    "tomli>=2.0; python_version<'3.11'",
+]
+
+[project.scripts]
+pymdd = "md2docx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["md2docx*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -27,3 +27,12 @@ target
 .DS_Store
 .tmp
 .serena
+
+# Python (python/ 移植版)
+python/.venv/
+python/**/__pycache__/
+python/*.egg-info/
+python/**/*.egg-info/
+python/.pytest_cache/
+python/dist/
+python/build/
